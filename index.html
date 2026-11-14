@@ -37,7 +37,7 @@
       min-height: 100svh;
       margin-inline: auto;
       display: grid;
-      grid-template-rows: auto 1fr auto;
+      grid-template-rows: auto 1fr auto auto;
     }
 
     .site-header, .site-footer {
@@ -80,7 +80,7 @@
       grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
       align-items: center;
       gap: clamp(42px, 7vw, 96px);
-      padding-block: 58px 76px;
+      padding-block: 58px 64px;
     }
 
     .intro { min-width: 0; }
@@ -233,6 +233,47 @@
     .continue span { font-size: 21px; font-weight: 500; line-height: 1; }
     .checkout-note { margin: 16px 0 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
 
+    .comment-label { margin-top: 20px; }
+    .optional { margin-left: 5px; color: var(--muted); font-weight: 400; }
+    textarea {
+      display: block;
+      width: 100%;
+      min-height: 74px;
+      padding: 11px 13px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      color: var(--text);
+      resize: vertical;
+      font: inherit;
+      line-height: 1.45;
+    }
+
+    textarea:focus { border-color: var(--accent); outline: 1px solid var(--accent); outline-offset: 0; }
+    textarea::placeholder { color: var(--muted); }
+    .amount-hint { margin-bottom: 0; }
+    .continue[hidden] { display: none; }
+    .continue:disabled { opacity: .62; cursor: wait; }
+    .form-error { margin: 12px 0 0; color: #ffb1ad; font-size: 14px; }
+    .no-script { margin: 12px 0 0; font-size: 14px; }
+    .no-script button { color: var(--accent); border: 0; padding: 0; background: transparent; text-decoration: underline; cursor: pointer; }
+
+    .activity {
+      padding-block: 30px 42px;
+      border-top: 1px solid var(--line);
+      scroll-margin-top: 16px;
+    }
+
+    .activity-header { display: flex; align-items: end; justify-content: space-between; gap: 18px; margin-bottom: 21px; }
+    .total { margin: 0; text-align: right; color: var(--muted); font-size: 13px; }
+    .total strong { display: block; color: var(--accent); font-size: 24px; font-variant-numeric: tabular-nums; letter-spacing: -.04em; }
+    .activity-status { margin: 0; color: var(--muted); }
+    .donation-list { margin: 0; padding: 0; list-style: none; }
+    .donation-list li { display: flex; justify-content: space-between; gap: 20px; padding: 14px 0; border-top: 1px solid var(--line); }
+    .donor-comment { min-width: 0; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .donor-comment.empty { color: var(--muted); }
+    .donation-amount { flex-shrink: 0; color: var(--accent); font: 600 14px var(--mono); }
+
     @media (max-width: 800px) {
       .shell { width: min(100% - 48px, 560px); min-height: 0; }
       main { grid-template-columns: 1fr; gap: 30px; padding-block: 32px 48px; }
@@ -294,13 +335,31 @@
               value="1" required aria-describedby="amount-hint">
             <span aria-hidden="true">USD</span>
           </div>
-          <p class="field-hint" id="amount-hint">Minimum $1 USD</p>
+          <p class="field-hint amount-hint" id="amount-hint">Minimum $1 USD</p>
 
-          <button class="continue" type="submit">Continue to Nanswap <span aria-hidden="true">→</span></button>
+          <label class="amount-label comment-label" for="comment">Public comment <span class="optional">(optional)</span></label>
+          <textarea id="comment" maxlength="240" rows="2" placeholder="Leave a note" aria-describedby="comment-hint" disabled></textarea>
+          <p class="field-hint" id="comment-hint">Your amount and comment appear after payment confirms. Keep wallet addresses and personal details out of your note.</p>
+
+          <button class="continue" id="tracked-checkout" type="submit" hidden>Continue to Nanswap <span aria-hidden="true">→</span></button>
+          <p class="form-error" id="checkout-error" role="alert" hidden></p>
+          <noscript>
+            <p class="no-script">Enable JavaScript to use donation tracking, or <button type="submit">continue to Nanswap directly</button>.</p>
+          </noscript>
         </form>
         <p class="checkout-note">Choose your cryptocurrency and review the total, including any fees, on Nanswap.</p>
       </section>
     </main>
+
+    <section class="activity" id="recent-donations" aria-labelledby="activity-title">
+      <div class="activity-header">
+        <h2 id="activity-title">Recent donations</h2>
+        <p class="total" id="funding" hidden><strong id="funding-total"></strong>Total donated via this tracker</p>
+      </div>
+      <p class="activity-status" id="activity-status" role="status" hidden></p>
+      <ol class="donation-list" id="donation-list" aria-label="Most recent confirmed donations"></ol>
+      <noscript><p class="activity-status">Enable JavaScript to see recent donations.</p></noscript>
+    </section>
 
     <footer class="site-footer">
       <a class="inline-link" href="https://github.com/VaporUnlocked">VaporUnlocked</a>
@@ -328,8 +387,102 @@
     }
 
     amount.addEventListener("input", updatePresets);
-    window.addEventListener("pageshow", updatePresets);
+    const api = "https://vaporlock-donations-api.quirky-titan-3549.chatgpt.site/donations";
+    const form = amount.form;
+    const comment = document.getElementById("comment");
+    const checkoutButton = document.getElementById("tracked-checkout");
+    const checkoutError = document.getElementById("checkout-error");
+    const funding = document.getElementById("funding");
+    const fundingTotal = document.getElementById("funding-total");
+    const activityStatus = document.getElementById("activity-status");
+    const donationList = document.getElementById("donation-list");
+    const usd = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
+    let lastFeed = "";
+    let refreshing = false;
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (checkoutButton.disabled) return;
+
+      checkoutError.hidden = true;
+      checkoutButton.disabled = true;
+      let redirecting = false;
+      try {
+        const response = await fetch(api, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          signal: AbortSignal.timeout(18_000),
+          body: JSON.stringify({ amount: amount.valueAsNumber, comment: comment.value }),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Checkout is temporarily unavailable.");
+        const link = new URL(data.checkoutUrl);
+        if (link.origin !== "https://nanswap.com" || !link.pathname.startsWith("/pay/")) {
+          throw new Error("Nanswap returned an unexpected checkout link.");
+        }
+        window.location.assign(link.href);
+        redirecting = true;
+      } catch (error) {
+        checkoutError.textContent = error instanceof TypeError || error.name === "TimeoutError"
+          ? "Could not reach checkout. Try again in a moment."
+          : error.message;
+        checkoutError.hidden = false;
+      } finally {
+        if (!redirecting) checkoutButton.disabled = false;
+      }
+    });
+
+    function showActivityStatus(message) {
+      if (activityStatus.textContent !== message) activityStatus.textContent = message;
+      activityStatus.hidden = !message;
+    }
+
+    async function refreshDonations() {
+      if (refreshing || document.hidden) return;
+      refreshing = true;
+      try {
+        const response = await fetch(api, { signal: AbortSignal.timeout(10_000) });
+        if (!response.ok) throw new Error("Feed unavailable");
+        const data = await response.json();
+        const snapshot = JSON.stringify(data);
+        if (snapshot !== lastFeed) {
+          const items = data.donations.map(donation => {
+            const item = document.createElement("li");
+            const note = document.createElement("p");
+            note.className = donation.comment ? "donor-comment" : "donor-comment empty";
+            note.textContent = donation.comment || "No comment";
+            note.dir = "auto";
+            const value = document.createElement("span");
+            value.className = "donation-amount";
+            value.textContent = usd.format(donation.amountCents / 100);
+            item.append(note, value);
+            return item;
+          });
+          donationList.replaceChildren(...items);
+          fundingTotal.textContent = usd.format(data.totalCents / 100);
+          funding.hidden = false;
+          lastFeed = snapshot;
+        }
+        showActivityStatus(data.donations.length ? "" : "No confirmed donations yet.");
+      } catch {
+        showActivityStatus(lastFeed ? "Could not refresh donations. Retrying shortly." : "Donation activity is temporarily unavailable.");
+      } finally {
+        refreshing = false;
+      }
+    }
+
+    window.addEventListener("pageshow", () => {
+      checkoutButton.disabled = false;
+      updatePresets();
+      refreshDonations();
+    });
+    document.addEventListener("visibilitychange", refreshDonations);
     presets.hidden = false;
+    comment.disabled = false;
+    checkoutButton.hidden = false;
+    showActivityStatus("Loading donations…");
+    refreshDonations();
+    window.setInterval(refreshDonations, 15_000);
   </script>
 </body>
 </html>
